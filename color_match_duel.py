@@ -1,7 +1,7 @@
 """
 🎨 Color Match Duel — A Two-Player Color Matching Game
 Both players see a target color and try to recreate it using a color picker.
-The closer match wins the round! 5 rounds total.
+The closer match wins the round! 5 rounds, 60 seconds per round.
 """
 
 import streamlit as st
@@ -10,6 +10,7 @@ import json
 import os
 import math
 import time
+from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # Page Config
@@ -128,11 +129,44 @@ st.markdown("""
         50% { opacity: 1; }
     }
 
-    .accuracy-bar {
-        height: 12px;
-        border-radius: 6px;
-        margin: 8px 0;
-        transition: width 0.5s ease;
+    /* Timer styles */
+    .timer-container {
+        text-align: center;
+        margin: 12px 0;
+    }
+
+    .timer-text {
+        font-size: 2.2rem;
+        font-weight: 800;
+        letter-spacing: 2px;
+    }
+
+    .timer-normal {
+        color: #4ade80 !important;
+    }
+
+    .timer-warning {
+        color: #fbbf24 !important;
+    }
+
+    .timer-danger {
+        color: #ef4444 !important;
+        animation: pulse 0.5s ease-in-out infinite;
+    }
+
+    .timer-bar {
+        width: 100%;
+        height: 8px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 4px;
+        margin-top: 8px;
+        overflow: hidden;
+    }
+
+    .timer-bar-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 1s linear;
     }
 
     div[data-testid="stColorPicker"] > div {
@@ -150,9 +184,11 @@ st.markdown("""
 # Game Constants
 # ============================================================
 TOTAL_ROUNDS = 5
+ROUND_TIME = 60  # seconds per round
 GAME_FILE = "/tmp/color_match_duel.json"
+DEFAULT_COLOR = "#808080"  # gray — submitted if time runs out
 
-# Target colors — curated for fun and challenge
+# Target colors
 TARGET_COLORS = [
     {"hex": "#e74c3c", "name": "Crimson Red"},
     {"hex": "#3498db", "name": "Ocean Blue"},
@@ -181,38 +217,26 @@ TARGET_COLORS = [
 # Helper Functions
 # ============================================================
 def hex_to_rgb(hex_color: str):
-    """Convert hex to RGB tuple."""
     h = hex_color.lstrip("#")
     return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
 
 
 def color_distance(hex1: str, hex2: str) -> float:
-    """
-    Calculate perceptual color distance using weighted Euclidean.
-    Returns a value 0-100 (0 = perfect match, 100 = max distance).
-    """
     r1, g1, b1 = hex_to_rgb(hex1)
     r2, g2, b2 = hex_to_rgb(hex2)
-
-    # Weighted Euclidean distance (human eye is more sensitive to green)
     dr = (r1 - r2) ** 2
     dg = (g1 - g2) ** 2
     db = (b1 - b2) ** 2
-
-    # Max possible distance with these weights
     max_dist = math.sqrt(2 * (255**2) + 4 * (255**2) + 3 * (255**2))
     dist = math.sqrt(2 * dr + 4 * dg + 3 * db)
-
     return round((dist / max_dist) * 100, 1)
 
 
 def accuracy_score(distance: float) -> int:
-    """Convert distance to a 0-100 accuracy score."""
     return max(0, round(100 - distance))
 
 
 def get_text_color(hex_color: str) -> str:
-    """Return black or white text depending on background brightness."""
     r, g, b = hex_to_rgb(hex_color)
     brightness = (r * 299 + g * 587 + b * 114) / 1000
     return "#333333" if brightness > 128 else "#ffffff"
@@ -241,7 +265,6 @@ def reset_game():
 
 
 def init_new_game():
-    """Create a brand new game state."""
     colors = random.sample(TARGET_COLORS, TOTAL_ROUNDS)
     return {
         "round": 1,
@@ -253,8 +276,58 @@ def init_new_game():
         "p2_score": 0,
         "p1_submitted": False,
         "p2_submitted": False,
-        "phase": "playing",  # "playing", "reveal", "final"
+        "phase": "playing",
+        "round_start_time": time.time(),  # <-- timer!
     }
+
+
+def get_remaining_time(game):
+    """Get remaining seconds for this round."""
+    start = game.get("round_start_time", time.time())
+    elapsed = time.time() - start
+    remaining = max(0, ROUND_TIME - elapsed)
+    return int(remaining)
+
+
+def auto_submit_on_timeout(game, player):
+    """If time is up and player hasn't submitted, auto-submit default color."""
+    answers_key = f"{player}_answers"
+    submitted_key = f"{player}_submitted"
+    if not game[submitted_key]:
+        # Submit whatever color they currently have picked, or default gray
+        current_color = st.session_state.get(f"picker_{game['round']}", DEFAULT_COLOR)
+        game[answers_key].append(current_color)
+        game[submitted_key] = True
+    return game
+
+
+def render_timer(remaining):
+    """Display the countdown timer with color coding."""
+    minutes = remaining // 60
+    seconds = remaining % 60
+    time_str = f"{minutes}:{seconds:02d}"
+
+    if remaining > 30:
+        css_class = "timer-normal"
+        bar_color = "#4ade80"
+    elif remaining > 10:
+        css_class = "timer-warning"
+        bar_color = "#fbbf24"
+    else:
+        css_class = "timer-danger"
+        bar_color = "#ef4444"
+
+    pct = (remaining / ROUND_TIME) * 100
+
+    st.markdown(
+        f'<div class="timer-container">'
+        f'<span class="timer-text {css_class}">⏱️ {time_str}</span>'
+        f'<div class="timer-bar">'
+        f'<div class="timer-bar-fill" style="width:{pct}%; background:{bar_color};"></div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -305,8 +378,9 @@ if st.session_state.player is None:
         "2️⃣ Choose Player 1 or Player 2<br>"
         "3️⃣ You'll both see a <strong>target color</strong><br>"
         "4️⃣ Use the color picker to match it as closely as you can<br>"
-        "5️⃣ After both submit, see who was closer!<br>"
-        "6️⃣ <strong>5 rounds</strong> — highest total score wins! 🏆</p>"
+        "5️⃣ You have <strong>60 seconds</strong> per round! ⏱️<br>"
+        "6️⃣ After both submit (or time runs out), see who was closer!<br>"
+        "7️⃣ <strong>5 rounds</strong> — highest total score wins! 🏆</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -326,7 +400,12 @@ else:
         save_game(init_new_game())
         game = load_game()
 
-    player = st.session_state.player  # "p1" or "p2"
+    # Ensure round_start_time exists (backward compat)
+    if "round_start_time" not in game:
+        game["round_start_time"] = time.time()
+        save_game(game)
+
+    player = st.session_state.player
     player_label = "🌸 Player 1" if player == "p1" else "💙 Player 2"
     other_label = "💙 Player 2" if player == "p1" else "🌸 Player 1"
     submitted_key = f"{player}_submitted"
@@ -335,6 +414,30 @@ else:
 
     current_round = game["round"]
     phase = game["phase"]
+
+    # ---- Auto-refresh ONLY during playing phase ----
+    if phase == "playing":
+        st_autorefresh(interval=1000, key=f"timer_refresh_{current_round}")
+
+    # ---- Check timeout ----
+    if phase == "playing":
+        remaining = get_remaining_time(game)
+        if remaining <= 0:
+            # Time's up! Auto-submit for both players
+            game = auto_submit_on_timeout(game, "p1")
+            game = auto_submit_on_timeout(game, "p2")
+            # Calculate scores
+            idx = current_round - 1
+            target_hex = game["targets"][idx]
+            p1_hex = game["p1_answers"][idx]
+            p2_hex = game["p2_answers"][idx]
+            p1_acc = accuracy_score(color_distance(target_hex, p1_hex))
+            p2_acc = accuracy_score(color_distance(target_hex, p2_hex))
+            game["p1_score"] += p1_acc
+            game["p2_score"] += p2_acc
+            game["phase"] = "reveal"
+            save_game(game)
+            st.rerun()
 
     # ---- Scoreboard ----
     col_s1, col_s2, col_s3 = st.columns([2, 1, 2])
@@ -400,7 +503,6 @@ else:
                 unsafe_allow_html=True,
             )
 
-        # Show all rounds summary
         st.markdown("### 📊 Round by Round")
         for i in range(TOTAL_ROUNDS):
             target_hex = game["targets"][i]
@@ -484,7 +586,6 @@ else:
                 unsafe_allow_html=True,
             )
 
-        # Round winner
         if p1_acc > p2_acc:
             st.success(f"🌸 Player 1 wins this round! ({p1_acc}% vs {p2_acc}%)")
         elif p2_acc > p1_acc:
@@ -504,6 +605,7 @@ else:
                 game["p1_submitted"] = False
                 game["p2_submitted"] = False
                 game["phase"] = "playing"
+                game["round_start_time"] = time.time()  # reset timer!
             save_game(game)
             st.rerun()
 
@@ -512,10 +614,14 @@ else:
         idx = current_round - 1
         target_hex = game["targets"][idx]
         target_name = game["target_names"][idx]
+        remaining = get_remaining_time(game)
 
         st.markdown("---")
 
-        # Show target color (name only — they need to match it!)
+        # ⏱️ TIMER
+        render_timer(remaining)
+
+        # Show target color
         st.markdown(f"### 🎯 Match this color: *{target_name}*")
         tc = get_text_color(target_hex)
         st.markdown(
@@ -528,7 +634,6 @@ else:
         already_submitted = game[submitted_key]
 
         if already_submitted:
-            # Player already submitted
             my_answer = game[answers_key][idx]
             tc = get_text_color(my_answer)
             st.markdown("### ✅ Your answer:")
@@ -539,7 +644,6 @@ else:
             )
 
             if game[other_submitted_key]:
-                # Both submitted — calculate scores and go to reveal
                 p1_hex = game["p1_answers"][idx]
                 p2_hex = game["p2_answers"][idx]
                 p1_acc = accuracy_score(color_distance(target_hex, p1_hex))
@@ -555,8 +659,6 @@ else:
                     f"⏳ Waiting for {other_label} to submit...</p>",
                     unsafe_allow_html=True,
                 )
-                if st.button("🔄 Refresh", use_container_width=True):
-                    st.rerun()
         else:
             # Show color picker
             st.markdown(f"### 🖌️ {player_label}, pick your color:")
@@ -589,7 +691,6 @@ else:
                 game[answers_key].append(chosen_color)
                 game[submitted_key] = True
 
-                # Check if other player also submitted
                 if game[other_submitted_key]:
                     p1_hex = game["p1_answers"][idx]
                     p2_hex = game["p2_answers"][idx]
